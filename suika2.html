@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>スイカゲーム風 (Canvas純粋JS版)</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-family: 'Arial', sans-serif;
+            background-color: #f0f8ff;
+            margin: 0;
+            padding-top: 20px;
+        }
+
+        h1 {
+            color: #2c3e50;
+        }
+
+        #gameCanvas {
+            border: 5px solid #3498db;
+            background-color: #ecf0f1;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
+            cursor: none; /* カーソルを非表示にして、落下ガイドの線を目立たせる */
+        }
+
+        #score {
+            margin-top: 10px;
+            font-size: 1.5em;
+            color: #e74c3c;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1> スイカゲーム風 (Canvas版)</h1>
+    <div id="score">スコア: 0</div>
+    <canvas id="gameCanvas" width="300" height="480"></canvas>
+    <p>マウスを左右に動かし、クリックするかスペースキーでフルーツを落としてください。</p>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const WIDTH = canvas.width;
+        const HEIGHT = canvas.height;
+        const WALL_THICKNESS = 10;
+        const GRAVITY = 0.5; // 重力の強さ
+        const FRICTION = 0.8; // 摩擦による速度減少
+
+        // --- フルーツの定義 ---
+        const FRUITS = [
+            { radius: 10, color: '#f79f79', next: 1, score: 10 },
+            { radius: 15, color: '#f7d08a', next: 2, score: 30 },
+            { radius: 20, color: '#e67e22', next: 3, score: 60 },
+            { radius: 25, color: '#f1c40f', next: 4, score: 100 },
+            { radius: 30, color: '#2ecc71', next: 5, score: 150 },
+            { radius: 35, color: '#16a085', next: 6, score: 210 },
+            { radius: 40, color: '#9b59b6', next: 7, score: 280 },
+            { radius: 45, color: '#3498db', next: 8, score: 360 },
+            { radius: 50, color: '#e67e22', next: 9, score: 450 },
+            { radius: 55, color: '#c0392b', next: 10, score: 550 },
+            { radius: 60, color: '#27ae60', next: null, score: 660 } // 最大サイズ
+        ];
+
+        // --- 変数 ---
+        let fruits = []; // 画面上の全フルーツを格納
+        let currentFruit = null; // 現在操作中のフルーツ（まだ落下していない）
+        let dropX = WIDTH / 2; // 落下位置
+        let nextFruitIndex = 0;
+        let score = 0;
+        const scoreDisplay = document.getElementById('score');
+        let isWaitingForNext = false; // 次のフルーツ生成待ちフラグ
+
+        // --- フルーツクラス ---
+        class Fruit {
+            constructor(index, x, y) {
+                const def = FRUITS[index];
+                this.index = index;
+                this.radius = def.radius;
+                this.color = def.color;
+                this.x = x;
+                this.y = y;
+                this.vx = 0; // X速度
+                this.vy = 0; // Y速度
+                this.isFalling = true; // 落下中フラグ
+                this.isColliding = false; // 合体処理中フラグ
+            }
+
+            // 描画
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+
+            // 物理挙動の更新
+            update() {
+                if (!this.isFalling) return;
+
+                // 1. 重力適用
+                this.vy += GRAVITY;
+                this.vy *= FRICTION; // 摩擦による速度減少
+
+                // 2. 位置更新
+                let newX = this.x + this.vx;
+                let newY = this.y + this.vy;
+
+                // 3. 衝突判定と位置補正
+                let stopped = false;
+                
+                // 床との衝突
+                if (newY + this.radius > HEIGHT - WALL_THICKNESS) {
+                    newY = HEIGHT - WALL_THICKNESS - this.radius;
+                    this.vy = 0;
+                    this.vx = 0;
+                    stopped = true;
+                }
+                
+                // 壁との衝突
+                if (newX - this.radius < WALL_THICKNESS) {
+                    newX = WALL_THICKNESS + this.radius;
+                    this.vx *= -0.5; // 跳ね返り
+                } else if (newX + this.radius > WIDTH - WALL_THICKNESS) {
+                    newX = WIDTH - WALL_THICKNESS - this.radius;
+                    this.vx *= -0.5; // 跳ね返り
+                }
+
+                // 他のフルーツとの衝突判定
+                for (let other of fruits) {
+                    if (other === this || other.isColliding) continue;
+
+                    const dx = newX - other.x;
+                    const dy = newY - other.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    const minDistance = this.radius + other.radius;
+
+                    if (distance < minDistance) {
+                        // 衝突している場合
+
+                        // **合体判定**
+                        if (this.index === other.index && !this.isColliding && !other.isColliding) {
+                            // 衝突した両方を合体処理中としてマーク
+                            this.isColliding = true;
+                            other.isColliding = true;
+                            mergeFruits(this, other);
+                            return; // 合体したため、これ以上このフレームでの移動は不要
+                        }
+
+                        // **押し出し処理（めり込み防止）**
+                        const overlap = minDistance - distance;
+                        const angle = Math.atan2(dy, dx);
+                        const pushX = Math.cos(angle) * overlap;
+                        const pushY = Math.sin(angle) * overlap;
+                        
+                        newX += pushX * 0.5; // 半分ずつ押し出す
+                        newY += pushY * 0.5; 
+
+                        // 速度の調整（摩擦と跳ね返り）
+                        const relVelX = this.vx - other.vx;
+                        const relVelY = this.vy - other.vy;
+                        const speedAlongNormal = relVelX * Math.cos(angle) + relVelY * Math.sin(angle);
+
+                        if (speedAlongNormal < 0) { // 離れる方向に動いている場合は無視
+                             // 跳ね返り係数 (0.2)
+                            const bounce = speedAlongNormal * (1 + 0.2); 
+                            this.vx -= bounce * Math.cos(angle);
+                            this.vy -= bounce * Math.sin(angle);
+                            other.vx += bounce * Math.cos(angle);
+                            other.vy += bounce * Math.sin(angle);
+                        }
+
+                        // 速度が十分に遅い場合は停止
+                        if (Math.abs(this.vx) < 0.1 && Math.abs(this.vy) < 0.1 && other.isFalling === false) {
+                             stopped = true;
+                        }
+
+                    }
+                }
+                
+                this.x = newX;
+                this.y = newY;
+                
+                // 最終的に停止判定
+                if (stopped && this.vy === 0) {
+                     this.isFalling = false;
+                     this.vx = 0;
+                }
+            }
+        }
+
+        // ----------------------------------------------------
+        // ## 1. ゲームロジック
+        // ----------------------------------------------------
+
+        // --- 次のフルーツを準備 ---
+        function setupNextFruit() {
+            if (isWaitingForNext || currentFruit) return;
+
+            // ランダムに小さいフルーツを選択
+            const index = Math.floor(Math.random() * 4); // 0〜3番目のフルーツ
+
+            // 落下前のフルーツを生成（y座標は常に固定）
+            currentFruit = new Fruit(index, dropX, FRUITS[index].radius + 5);
+            currentFruit.isFalling = false; // 落下しないようにする
+        }
+
+        // --- フルーツの合体処理 ---
+        function mergeFruits(f1, f2) {
+            isWaitingForNext = true;
+            const nextIndex = FRUITS[f1.index].next;
+            
+            // 削除対象としてマーク
+            f1.isColliding = true;
+            f2.isColliding = true;
+
+            // 既存のフルーツリストから削除
+            fruits = fruits.filter(f => f !== f1 && f !== f2);
+
+            if (nextIndex !== null) {
+                // 新しいフルーツの位置は、2つのフルーツの中心点
+                const newX = (f1.x + f2.x) / 2;
+                const newY = (f1.y + f2.y) / 2;
+                
+                // 新しいフルーツを生成し、少し上向きの勢いを付ける
+                const newFruit = new Fruit(nextIndex, newX, newY);
+                newFruit.vy = -3;
+                newFruit.vx = (Math.random() - 0.5) * 2;
+                fruits.push(newFruit);
+                
+                score += FRUITS[nextIndex].score; 
+                scoreDisplay.textContent = `スコア: ${score}`;
+            } else {
+                // スイカになった場合
+                score += FRUITS[f1.index].score + 1000;
+                scoreDisplay.textContent = `スコア: ${score}`;
+            }
+            
+            // 合体時のエフェクト表示や遅延処理
+            setTimeout(() => {
+                isWaitingForNext = false;
+            }, 100); // 合体中は次の操作をブロック
+        }
+        
+        // --- 落下処理 ---
+        function dropFruit() {
+            if (currentFruit && !isWaitingForNext) {
+                currentFruit.isFalling = true; // 落下開始
+                fruits.push(currentFruit);
+                currentFruit = null;
+                
+                // 落下後、少し遅延させて次のフルーツを準備
+                setTimeout(() => {
+                    setupNextFruit();
+                }, 400); 
+            }
+        }
+        
+        // ----------------------------------------------------
+        // ## 2. 描画と更新ループ
+        // ----------------------------------------------------
+        
+        function drawBoundaries() {
+            // 壁と床
+            ctx.fillStyle = '#34495e';
+            ctx.fillRect(0, 0, WALL_THICKNESS, HEIGHT); // 左壁
+            ctx.fillRect(WIDTH - WALL_THICKNESS, 0, WALL_THICKNESS, HEIGHT); // 右壁
+            ctx.fillRect(0, HEIGHT - WALL_THICKNESS, WIDTH, WALL_THICKNESS); // 床
+        }
+        
+        function drawDropLine() {
+            if (currentFruit) {
+                ctx.strokeStyle = 'rgba(231, 76, 60, 0.7)'; // 赤色の半透明
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]); // 破線
+                ctx.beginPath();
+                ctx.moveTo(dropX, 0);
+                ctx.lineTo(dropX, HEIGHT - WALL_THICKNESS);
+                ctx.stroke();
+                ctx.setLineDash([]); // 元に戻す
+            }
+        }
+
+        // メインの更新/描画ループ
+        function update() {
+            // 描画をクリア
+            ctx.clearRect(0, 0, WIDTH, HEIGHT);
+            
+            drawBoundaries();
+            drawDropLine();
+
+            // 既存のフルーツを更新・描画
+            for (let i = 0; i < fruits.length; i++) {
+                fruits[i].update();
+                fruits[i].draw();
+            }
+            
+            // 操作中のフルーツをマウス位置に移動し、描画
+            if (currentFruit) {
+                currentFruit.x = dropX;
+                currentFruit.draw();
+            }
+
+            // ゲームオーバー判定 (一番上の境界線)
+            // if (fruits.some(f => f.y - f.radius < 5)) {
+            //     // 厳密な判定が必要だが、今回は省略
+            // }
+
+            requestAnimationFrame(update);
+        }
+
+        // ----------------------------------------------------
+        // ## 3. イベント処理と初期化
+        // ----------------------------------------------------
+
+        // マウスの移動（落下位置の制御）
+        canvas.addEventListener('mousemove', (e) => {
+            if (currentFruit) {
+                const rect = canvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                
+                // 壁の境界内になるようにX座標を制限
+                const minX = currentFruit.radius + WALL_THICKNESS;
+                const maxX = WIDTH - currentFruit.radius - WALL_THICKNESS;
+                
+                dropX = Math.max(minX, Math.min(maxX, mouseX));
+            }
+        });
+
+        // クリックで落下
+        canvas.addEventListener('click', dropFruit);
+        
+        // スペースキーで落下
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') {
+                e.preventDefault(); 
+                dropFruit();
+            }
+        });
+
+        // ゲーム開始
+        function initGame() {
+            setupNextFruit();
+            update(); // メインループ開始
+        }
+        
+        initGame();
+    </script>
+</body>
+</html>
